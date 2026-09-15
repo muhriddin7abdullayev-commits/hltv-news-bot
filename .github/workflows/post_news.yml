@@ -1,0 +1,37 @@
+name: HLTV yangiliklarini Telegramga post qilish
+
+on:
+  schedule:
+    # Har 15 daqiqada ishga tushadi (GitHub'da aniq vaqt kafolatlanmaydi,
+    # ba'zan bir necha daqiqa kechikishi mumkin)
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}  # "Run workflow" tugmasi bilan qo'lda ham ishga tushirish mumkin
+
+permissions:
+  contents: write  # seen.json faylini repo'ga qaytarib commit qilish uchun
+
+jobs:
+  post-news:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repo'ni olish
+        uses: actions/checkout@v4
+
+      - name: Python o'rnatish
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Botni ishga tushirish
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python post_news.py
+
+      - name: seen.json holatini saqlash
+        run: |
+          git config user.name "hltv-news-bot"
+          git config user.email "actions@github.com"
+          git add seen.json
+          git diff --staged --quiet || git commit -m "seen.json yangilandi"
+          git push
