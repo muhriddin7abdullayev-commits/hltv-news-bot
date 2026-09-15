@@ -37,7 +37,9 @@ import xml.etree.ElementTree as ET
 
 RSS_URL = os.environ.get(
     "RSS_URL",
-    "https://news.google.com/rss/search?q=CS2+OR+Counter-Strike+esports&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=CS2+OR+%22Counter-Strike%22+"
+    "(tournament+OR+match+OR+final+OR+playoffs+OR+beat+OR+defeat)"
+    "&hl=en-US&gl=US&ceid=US:en",
 )
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -159,6 +161,53 @@ def translate_text(text, target_lang):
         return text
 
 
+EXCLUDE_KEYWORDS = (
+    "how to",
+    "guide",
+    "best settings",
+    "best crosshair",
+    "launch options",
+    "tier list",
+    "wallpaper",
+    "release date",
+    " tips",
+    "callouts",
+)
+
+INCLUDE_KEYWORDS = (
+    "beat",
+    "defeat",
+    "win",
+    "wins",
+    "won",
+    "final",
+    "playoff",
+    "qualifier",
+    "bracket",
+    "champion",
+    "tournament",
+    "major",
+    " vs ",
+    "vs.",
+    "match",
+    "round",
+    "advance",
+    "eliminate",
+    "upset",
+    "result",
+)
+
+
+def is_match_result_news(title):
+    """Faqat turnir/match natijalariga oid yangiliklarni qoldiradi;
+    'qanday qilish', 'eng yaxshi sozlamalar' kabi qo'llanma
+    maqolalarni chiqarib tashlaydi."""
+    lowered = title.lower()
+    if any(bad in lowered for bad in EXCLUDE_KEYWORDS):
+        return False
+    return any(good in lowered for good in INCLUDE_KEYWORDS)
+
+
 def send_telegram_message(text):
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = json.dumps(
@@ -189,14 +238,18 @@ def format_message(item):
     desc_ru = html.escape(translate_text(item["description"], "ru"))
     link = html.escape(item["link"], quote=True)
 
-    parts = [f"🟠 <b>🇺🇿 {title_uz}</b>"]
+    lines = [f"🇺🇿 <b>{title_uz}</b>"]
     if desc_uz:
-        parts.append(desc_uz)
-    parts.append(f"<b>🇷🇺 {title_ru}</b>")
+        lines.append(desc_uz)
+
+    lines.append("┈┈┈┈┈┈┈┈┈┈")
+
+    lines.append(f"🇷🇺 <b>{title_ru}</b>")
     if desc_ru:
-        parts.append(desc_ru)
-    parts.append(f'\n<a href="{link}">Manba / Источник →</a>')
-    return "\n\n".join(parts)
+        lines.append(desc_ru)
+
+    lines.append(f'\n🔗 <a href="{link}">To\'liq / Подробнее</a>')
+    return "\n".join(lines)
 
 
 def main():
@@ -223,11 +276,20 @@ def main():
 
     # RSS odatda yangidan eskiga tartiblangan bo'ladi; eng eski yangidan
     # boshlab yuboramiz, shunda kanalda xronologik tartib saqlanadi.
-    new_items = [it for it in items if it["link"] not in seen]
+    unseen_items = [it for it in items if it["link"] not in seen]
+    new_items = []
+    for it in unseen_items:
+        if is_match_result_news(it["title"]):
+            new_items.append(it)
+        else:
+            # Mavzuga mos kelmaydi (guide/tips va h.k.) — post qilinmaydi,
+            # lekin har safar qayta tekshirilmasligi uchun "seen" belgilanadi
+            seen.add(it["link"])
     new_items.reverse()
 
     if not new_items:
-        print("Yangi yangilik yo'q.")
+        save_seen(seen)
+        print("Yangi mos yangilik yo'q (filtr yoki yangilik yo'qligi sababli).")
         return
 
     posted = 0
