@@ -27,6 +27,8 @@ import os
 import re
 import sys
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -42,6 +44,17 @@ USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+
+# HLTV Cloudflare orqasida turadi va oddiy User-Agent'ni ko'pincha bot deb
+# bloklaydi (403). Haqiqiy brauzerga o'xshash to'liq header to'plami
+# yuborish blok bo'lish ehtimolini kamaytiradi.
+REQUEST_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.hltv.org/",
+    "Connection": "keep-alive",
+}
 
 
 def load_seen():
@@ -62,9 +75,29 @@ def save_seen(seen_links):
 
 
 def fetch_rss(url):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        return resp.read()
+    """RSS'ni oladi. Avval to'g'ridan-to'g'ri, muvaffaqiyatsiz bo'lsa
+    (masalan 403 Forbidden — Cloudflare GitHub'ning datacenter IP'sini
+    bloklagan bo'lsa), ochiq proksi orqali qayta urinadi."""
+    req = urllib.request.Request(url, headers=REQUEST_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (403, 429, 503):
+            raise
+        print(
+            f"To'g'ridan-to'g'ri so'rov {exc.code} bilan qaytdi, "
+            "proksi orqali qayta urinilmoqda...",
+            file=sys.stderr,
+        )
+        proxy_url = "https://api.allorigins.win/raw?url=" + urllib.parse.quote(
+            url, safe=""
+        )
+        proxy_req = urllib.request.Request(
+            proxy_url, headers={"User-Agent": USER_AGENT}
+        )
+        with urllib.request.urlopen(proxy_req, timeout=30) as resp:
+            return resp.read()
 
 
 def strip_html(text):
