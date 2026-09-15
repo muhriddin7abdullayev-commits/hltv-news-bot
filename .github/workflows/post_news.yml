@@ -1,37 +1,218 @@
-name: HLTV yangiliklarini Telegramga post qilish
+#!/usr/bin/env python3
+"""
+HLTV -> Telegram avtomatik yangiliklar boti.
 
-on:
-  schedule:
-    # Har 15 daqiqada ishga tushadi (GitHub'da aniq vaqt kafolatlanmaydi,
-    # ba'zan bir necha daqiqa kechikishi mumkin)
-    - cron: "*/15 * * * *"
-  workflow_dispatch: {}  # "Run workflow" tugmasi bilan qo'lda ham ishga tushirish mumkin
+Ishlash printsipi:
+1. HLTV.org rasmiy RSS lentasidan (https://www.hltv.org/rss/news) so'nggi
+   yangiliklarni oladi. RSS HTML scraping'ga qaraganda ancha barqaror va
+   HLTV'ning bot-himoyasiga (Cloudflare) duch kelish ehtimoli kamroq.
+2. Avval yuborilgan yangiliklarni seen.json faylida saqlab boradi, shunday
+   qilib bir xil yangilik ikki marta post qilinmaydi.
+3. Yangi topilgan har bir yangilikni belgilangan Telegram kanaliga yuboradi.
 
-permissions:
-  contents: write  # seen.json faylini repo'ga qaytarib commit qilish uchun
+Ishga tushirish:
+    python3 post_news.py
 
-jobs:
-  post-news:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Repo'ni olish
-        uses: actions/checkout@v4
+Muhit o'zgaruvchilari (environment variables) orqali sozlanadi:
+    TELEGRAM_BOT_TOKEN  - @BotFather bergan bot tokeni
+    TELEGRAM_CHAT_ID    - kanal ID'si yoki @kanal_username
+    RSS_URL             - (ixtiyoriy) standart: https://www.hltv.org/rss/news
+    MAX_POSTS_PER_RUN   - (ixtiyoriy) bitta ishga tushirishda nechta yangilik
+                           yuborilsin, standart: 5 (spam bo'lib ketmasligi uchun)
+"""
 
-      - name: Python o'rnatish
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+import html
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 
-      - name: Botni ishga tushirish
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python post_news.py
+RSS_URL = os.environ.get("RSS_URL", "https://www.hltv.org/rss/news")
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "5"))
 
-      - name: seen.json holatini saqlash
-        run: |
-          git config user.name "hltv-news-bot"
-          git config user.email "actions@github.com"
-          git add seen.json
-          git diff --staged --quiet || git commit -m "seen.json yangilandi"
-          git push
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SEEN_FILE = os.path.join(SCRIPT_DIR, "seen.json")
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+# HLTV Cloudflare orqasida turadi va oddiy User-Agent'ni ko'pincha bot deb
+# bloklaydi (403). Haqiqiy brauzerga o'xshash to'liq header to'plami
+# yuborish blok bo'lish ehtimolini kamaytiradi.
+REQUEST_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.9",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.hltv.org/",
+    "Connection": "keep-alive",
+}
+
+
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return set()
+    try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def save_seen(seen_links):
+    # Fayl cheksiz o'smasligi uchun oxirgi 500 tasini saqlaymiz
+    trimmed = list(seen_links)[-500:]
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(trimmed, f, ensure_ascii=False, indent=2)
+
+
+def fetch_rss(url):
+    """RSS'ni oladi. Avval to'g'ridan-to'g'ri, muvaffaqiyatsiz bo'lsa
+    (masalan 403 Forbidden — Cloudflare GitHub'ning datacenter IP'sini
+    bloklagan bo'lsa), ochiq proksi orqali qayta urinadi."""
+    req = urllib.request.Request(url, headers=REQUEST_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (403, 429, 503):
+            raise
+        print(
+            f"To'g'ridan-to'g'ri so'rov {exc.code} bilan qaytdi, "
+            "proksi orqali qayta urinilmoqda...",
+            file=sys.stderr,
+        )
+        proxy_url = "https://api.allorigins.win/raw?url=" + urllib.parse.quote(
+            url, safe=""
+        )
+        proxy_req = urllib.request.Request(
+            proxy_url, headers={"User-Agent": USER_AGENT}
+        )
+        with urllib.request.urlopen(proxy_req, timeout=30) as resp:
+            return resp.read()
+
+
+def strip_html(text):
+    """RSS description ichidagi HTML teglarini olib tashlaydi."""
+    text = re.sub(r"<[^>]+>", "", text or "")
+    return html.unescape(text).strip()
+
+
+def parse_items(xml_bytes):
+    root = ET.fromstring(xml_bytes)
+    items = []
+    for item in root.findall(".//item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        description = strip_html(item.findtext("description") or "")
+        pub_date = (item.findtext("pubDate") or "").strip()
+        if title and link:
+            items.append(
+                {
+                    "title": html.unescape(title),
+                    "link": link,
+                    "description": description,
+                    "pub_date": pub_date,
+                }
+            )
+    return items
+
+
+def send_telegram_message(text):
+    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = json.dumps(
+        {
+            "chat_id": CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        }
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        api_url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        result = json.loads(resp.read().decode("utf-8"))
+    if not result.get("ok"):
+        raise RuntimeError(f"Telegram xatosi: {result}")
+    return result
+
+
+def format_message(item):
+    title = html.escape(item["title"])
+    description = html.escape(item["description"])
+    link = html.escape(item["link"], quote=True)
+    parts = [f"🟠 <b>{title}</b>"]
+    if description:
+        parts.append(description)
+    parts.append(f'\n<a href="{link}">To\'liq o\'qish →</a>')
+    return "\n\n".join(parts)
+
+
+def main():
+    if not BOT_TOKEN or not CHAT_ID:
+        print(
+            "XATOLIK: TELEGRAM_BOT_TOKEN va TELEGRAM_CHAT_ID "
+            "muhit o'zgaruvchilarini o'rnating.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    seen = load_seen()
+
+    try:
+        xml_bytes = fetch_rss(RSS_URL)
+    except Exception as exc:
+        print(f"RSS'ni olishda xatolik: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    items = parse_items(xml_bytes)
+    if not items:
+        print("Hech qanday yangilik topilmadi (RSS bo'sh yoki formati o'zgargan).")
+        return
+
+    # RSS odatda yangidan eskiga tartiblangan bo'ladi; eng eski yangidan
+    # boshlab yuboramiz, shunda kanalda xronologik tartib saqlanadi.
+    new_items = [it for it in items if it["link"] not in seen]
+    new_items.reverse()
+
+    if not new_items:
+        print("Yangi yangilik yo'q.")
+        return
+
+    posted = 0
+    for item in new_items:
+        if posted >= MAX_POSTS_PER_RUN:
+            print(
+                f"MAX_POSTS_PER_RUN ({MAX_POSTS_PER_RUN}) chegarasiga yetdi, "
+                "qolganlari keyingi ishga tushirishda yuboriladi."
+            )
+            break
+        try:
+            send_telegram_message(format_message(item))
+            print(f"Yuborildi: {item['title']}")
+            seen.add(item["link"])
+            posted += 1
+            time.sleep(2)  # Telegram rate-limit'iga hurmat
+        except Exception as exc:
+            print(f"Yuborishda xatolik ({item['title']}): {exc}", file=sys.stderr)
+            # Xato bo'lsa ham davom etamiz, lekin bu itemni 'seen' qilmaymiz
+            # keyingi safar qayta urinib ko'radi
+
+    save_seen(seen)
+    print(f"Jami {posted} ta yangi yangilik post qilindi.")
+
+
+if __name__ == "__main__":
+    main()
