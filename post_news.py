@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-HLTV -> Telegram avtomatik yangiliklar boti.
+CS2/Counter-Strike -> Telegram avtomatik yangiliklar boti.
 
 Ishlash printsipi:
-1. HLTV.org rasmiy RSS lentasidan (https://www.hltv.org/rss/news) so'nggi
-   yangiliklarni oladi. RSS HTML scraping'ga qaraganda ancha barqaror va
-   HLTV'ning bot-himoyasiga (Cloudflare) duch kelish ehtimoli kamroq.
+1. Google News'ning CS2/Counter-Strike bo'yicha qidiruv RSS lentasidan
+   so'nggi yangiliklarni oladi (turli manbalardan: HLTV, Dust2, Dexerto va h.k.).
+   To'g'ridan-to'g'ri HLTV.org'dan olish o'rniga shu yo'l tanlangan, chunki
+   HLTV Cloudflare orqali bot so'rovlarini (shu jumladan GitHub Actions'ning
+   datacenter IP'larini) qattiq bloklaydi — Google News esa bunday cheklov
+   qo'ymaydi va barqaror ishlaydi.
 2. Avval yuborilgan yangiliklarni seen.json faylida saqlab boradi, shunday
    qilib bir xil yangilik ikki marta post qilinmaydi.
 3. Yangi topilgan har bir yangilikni belgilangan Telegram kanaliga yuboradi.
@@ -32,7 +35,10 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
-RSS_URL = os.environ.get("RSS_URL", "https://www.hltv.org/rss/news")
+RSS_URL = os.environ.get(
+    "RSS_URL",
+    "https://news.google.com/rss/search?q=CS2+OR+Counter-Strike+esports&hl=en-US&gl=US&ceid=US:en",
+)
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "5"))
