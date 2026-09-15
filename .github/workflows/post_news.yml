@@ -2,13 +2,11 @@ name: HLTV yangiliklarini Telegramga post qilish
 
 on:
   schedule:
-    # Har 15 daqiqada ishga tushadi (GitHub'da aniq vaqt kafolatlanmaydi,
-    # ba'zan bir necha daqiqa kechikishi mumkin)
     - cron: "*/15 * * * *"
-  workflow_dispatch: {}  # "Run workflow" tugmasi bilan qo'lda ham ishga tushirish mumkin
+  workflow_dispatch: {}
 
 permissions:
-  contents: write  # seen.json faylini repo'ga qaytarib commit qilish uchun
+  contents: write
 
 jobs:
   post-news:
