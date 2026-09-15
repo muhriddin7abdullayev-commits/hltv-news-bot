@@ -132,6 +132,33 @@ def parse_items(xml_bytes):
     return items
 
 
+def translate_text(text, target_lang):
+    """Matnni tarjima qiladi (Google'ning ochiq, API-kalitsiz tarjima
+    endpoint'i orqali). Xato bo'lsa, asl matnni qaytaradi — bot to'xtab
+    qolmasin uchun."""
+    if not text:
+        return ""
+    try:
+        params = urllib.parse.urlencode(
+            {
+                "client": "gtx",
+                "sl": "auto",
+                "tl": target_lang,
+                "dt": "t",
+                "q": text,
+            }
+        )
+        url = f"https://translate.googleapis.com/translate_a/single?{params}"
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        # Javob formati: [[["tarjima1","asl1",...], ["tarjima2","asl2",...], ...], ...]
+        return "".join(segment[0] for segment in data[0] if segment[0])
+    except Exception as exc:
+        print(f"Tarjima xatosi ({target_lang}): {exc}", file=sys.stderr)
+        return text
+
+
 def send_telegram_message(text):
     api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = json.dumps(
@@ -156,13 +183,19 @@ def send_telegram_message(text):
 
 
 def format_message(item):
-    title = html.escape(item["title"])
-    description = html.escape(item["description"])
+    title_uz = html.escape(translate_text(item["title"], "uz"))
+    title_ru = html.escape(translate_text(item["title"], "ru"))
+    desc_uz = html.escape(translate_text(item["description"], "uz"))
+    desc_ru = html.escape(translate_text(item["description"], "ru"))
     link = html.escape(item["link"], quote=True)
-    parts = [f"🟠 <b>{title}</b>"]
-    if description:
-        parts.append(description)
-    parts.append(f'\n<a href="{link}">To\'liq o\'qish →</a>')
+
+    parts = [f"🟠 <b>🇺🇿 {title_uz}</b>"]
+    if desc_uz:
+        parts.append(desc_uz)
+    parts.append(f"<b>🇷🇺 {title_ru}</b>")
+    if desc_ru:
+        parts.append(desc_ru)
+    parts.append(f'\n<a href="{link}">Manba / Источник →</a>')
     return "\n\n".join(parts)
 
 
